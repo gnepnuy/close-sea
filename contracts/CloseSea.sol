@@ -7,16 +7,7 @@ import './Counters.sol';
 import './IERC721.sol';
 import './Context.sol';
 
-/**
 
-这个项目的设想是来源于etherscan提供了对于nft展示功能和聊天功能，这里只需要加一个担保人的角色就能完成交易。
-我的想法用一个智能合约来充当担保人的角色。
-具体实现：
-  1，买卖双方通过自行线下沟通确定好交易的价格
-  2，买家创建一笔购买订单，附带与卖家商量好的eth数量，这时候eth被转入到智能合约中，成功后买家会得到一个订单号
-  3，卖家拿到订单号后，选择是否要把nft出售给买家，这里可以加一个小费功能（设想中交易不收取手续费，也没有版税，所以小费是项目唯一的收入来源）
-  4，如果卖家迟迟没有选择出售，那么买家可以随时取消这个购买订单
- */
 contract CloseSea is ReentrancyGuard,Context{
 
 
@@ -25,10 +16,14 @@ contract CloseSea is ReentrancyGuard,Context{
 
   Counters.Counter orderIds;
 
+  mapping(uint256 => Order) orders;
+  mapping(address => uint256[]) userOrders;
+
 
   enum Status{
     open,
-    close
+    close,
+    cancel
   }
 
   enum Direction{
@@ -38,53 +33,173 @@ contract CloseSea is ReentrancyGuard,Context{
 
   struct Order {
       uint256 id;
-      address nft;
       uint256 tokenId;
       uint256 price;
+      address nft;
       address otherside;
+      address creater;
       Direction direction;
       Status status;
   }
 
-  constructor(){
+  event CreateOrder(address creater,uint256 orderId,Direction direction);
+  event CancelOrder(address creater,uint256 orderId,Direction direction);
+  event Clinch(address indexed nft,uint256 indexed orderId,uint256 tokenId,uint256 price);
+  event UpdatePrice(uint256 indexed orderId,uint256 price,uint256 newPrice);
 
-    
+  constructor(){  
+
   }
 
-  /**
-    卖方创建订单
-    列出要卖的nft和价格
-    也可以限定买家
-   */
-  function offerForSale(address _nft,uint256 _tokenId,uint256 _price,address _buyer) external nonReentrant{
-    //检验approve
-    
+  function getOrderInfo(uint256[] memory _ids)public view returns(Order[] memory){
+    Order[] memory _orders = new Order[](_ids.length);
+
+    for(uint256 i;i < _ids.length;i++){
+      _orders[i] = orders[_ids[i]];
+    }
+    return _orders;
+  }
+
+  function getUserOrder(address _user)external view returns(Order[] memory){
+    return getOrderInfo(userOrders[_user]);
+  }
+
+
+  function offerForSale(address _nft,uint256 _tokenId,uint256 _price) external nonReentrant{
+    _offerForSale(_nft,_tokenId,_price,address(0));
+  }
+
+  function offerForSaleWithLimitedBuyer(address _nft,uint256 _tokenId,uint256 _price,address _buyer) external nonReentrant{
+    _offerForSale(_nft,_tokenId,_price,_buyer);
+  }
+
+  function _offerForSale(address _nft,uint256 _tokenId,uint256 _price,address _buyer) internal{
     address approvedAddress = IERC721(_nft).getApproved(_tokenId);
     bool isOperator = IERC721(_nft).isApprovedForAll(_msgSender(), address(this));
     require(approvedAddress == address(this) || isOperator,'not allowed');
-    //生成订单id
+    
+    _createOrder(_nft, _tokenId, _price, _buyer, Direction.sell);
+  }
+
+  
+
+  
+ 
+  function offerForBuyer(address _nft,uint256 _tokenId)payable external nonReentrant{
+    require(msg.value > 0,'Price must be greater than 0');
+    _createOrder(_nft, _tokenId, msg.value, address(0), Direction.buy);
+  }
+
+  
+
+
+  function cancelOrder(uint256 _orderId) external nonReentrant {
+    require(_orderId < orderIds.current(),'order does not exist');
+
+    Order storage order = orders[_orderId];
+    require(order.creater == _msgSender(),'not your order');
+    require(order.status == Status.open,'order closed');
+
+    order.status = Status.cancel;
+    if(order.direction == Direction.buy){
+      require(
+        payable(_msgSender()).send(order.price),
+        'Failed to return eth'
+        );
+    }
+    emit CancelOrder(_msgSender(), _orderId, order.direction);
+  }
+
+  function updateBuyOrderPrice(uint256 _orderId,uint256 _price,uint256 _newPrice)payable external nonReentrant{
+    _checkOrderInfo(_orderId,_price,_newPrice);
+
+    Order storage order = orders[_orderId];
+    require(order.direction == Direction.buy,'not buy order');
+    if(_price > _newPrice){
+      require(payable(_msgSender()).send(_price - _newPrice),'Failed to return eth');
+    }else{
+      require(msg.value == _newPrice - _price,'The price increase does not match');
+    }
+    order.price = _newPrice;
+    emit UpdatePrice(_orderId, _price, _newPrice);
+  }
+
+  function updateSellOrderPrice(uint256 _orderId,uint256 _price,uint256 _newPrice)external nonReentrant{
+    _checkOrderInfo(_orderId,_price,_newPrice);
+
+    Order storage order = orders[_orderId];
+    require(order.direction == Direction.sell,'not sale order');
+    order.price = _newPrice;
+    emit UpdatePrice(_orderId, _price, _newPrice);
+  }
+
+  function makeDeal(uint256 _orderId,uint256 _price,uint256 _tokenId,address _nft)payable external nonReentrant{
+    require(_orderId < orderIds.current(),'order does not exist');
+    
+    Order storage order = orders[_orderId];
+    require(order.status == Status.open,'order closed');
+    require(order.price == _price && order.tokenId == _tokenId && order.nft == _nft,'Order information has changed');
+    require(order.creater != _msgSender(),'Cannot trade own orders');
+    if(order.otherside != address(0)){
+      require(_msgSender() == order.otherside,'you are not that person');
+    }
+    _checkNftIsAllowed(order);
+    
+    order.status = Status.close;
+    if(order.direction == Direction.buy){
+      IERC721(order.nft).safeTransferFrom(_msgSender(), order.creater, order.tokenId);
+      require(payable(_msgSender()).send(order.price),'Failed to transfer eth');
+    }else{
+      IERC721(order.nft).safeTransferFrom(order.creater,_msgSender(), order.tokenId);
+      require(payable(order.creater).send(order.price),'Failed to transfer eth');
+    }
+    emit Clinch(order.nft, order.tokenId, order.price, order.id);
+  }
+
+  function _createOrder(address _nft,uint256 _tokenId,uint256 _price,address _otherside,Direction direction)internal{
     uint256 _id = orderIds.current();
-    //创建订单
     Order memory order =  Order({
       id: _id,
-      nft: _nft,
       tokenId: _tokenId,
       price: _price,
-      otherside: _buyer,
-      direction: Direction.buy,
+      nft: _nft,
+      otherside: _otherside,
+      creater: _msgSender(),
+      direction: direction,
       status: Status.open
     });
-    //event log
+    orders[_id] = order;
+    userOrders[_msgSender()].push(_id);
+
+    orderIds.increment();
+    emit CreateOrder(_msgSender(), _id, Direction.sell);
   }
 
 
+  function _checkOrderInfo(uint256 _orderId,uint256 _price,uint256 _newPrice) internal view {
+    require(_orderId < orderIds.current(),'order does not exist');
+    require(_price != _newPrice,'why do it');
 
-  function cancelOrder(uint256 orderId) public {
-    
+    Order memory order = orders[_orderId];
+    require(order.status == Status.open,'order closed');
+    require(order.price == _price ,'Order information has changed');
+    require(order.creater == _msgSender(),'not your order');
   }
 
-  function makeDeal(uint256 orderId) public{
+  
+  
 
+  function _checkNftIsAllowed(Order memory _order) internal view{
+    address nftOwner = _msgSender();
+    if(_order.direction == Direction.sell){
+      nftOwner = _order.creater;
+    }
+    address ownerOf = IERC721(_order.nft).ownerOf(_order.tokenId);
+    require(nftOwner == ownerOf,'nft does not exist');
+
+    address approvedAddress = IERC721(_order.nft).getApproved(_order.tokenId);
+    bool isOperator = IERC721(_order.nft).isApprovedForAll(ownerOf, address(this));
+    require(approvedAddress == address(this) || isOperator,'not allowed');
   }
 }
 
