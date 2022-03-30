@@ -14,3 +14,15 @@
 -- 测试nft
   1,bayc  0xF0F6D910c1DC0208550F8Be8ab10A8988ffDfaC0
   2,doodles 0x3Bfb10b71f33de192F913AbB474E00829fA86c7e
+
+-- 测试记录
+  合约：0x77d3345a6eeE083Cc68AB2E725D0f9C9a7043609 //v1
+        0x56EF41C7ca32f64BdF1cD814C6375560371155bC //v2
+    1，offerForBuyer 接口通过✔
+    2，offerForSale 接口通过✔
+    3，offerForSaleWithLimitedBuyer 接口通过✔
+    4，updateBuyOrderPrice 接口通过✔
+    5，updateSellOrderPrice 接口通过✔
+    6，cancelOrder 接口通过✔
+    7, makeDeal 接口通过✔
+

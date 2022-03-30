@@ -35,6 +35,7 @@ contract CloseSea is ReentrancyGuard,Context{
       uint256 id;
       uint256 tokenId;
       uint256 price;
+      uint256 deadline;
       address nft;
       address otherside;
       address creater;
@@ -64,30 +65,40 @@ contract CloseSea is ReentrancyGuard,Context{
     return getOrderInfo(userOrders[_user]);
   }
 
-
-  function offerForSale(address _nft,uint256 _tokenId,uint256 _price) external nonReentrant{
-    _offerForSale(_nft,_tokenId,_price,address(0));
+  function nextOrderId()external view returns(uint256 orderId){
+    return orderIds.current();
   }
 
-  function offerForSaleWithLimitedBuyer(address _nft,uint256 _tokenId,uint256 _price,address _buyer) external nonReentrant{
-    _offerForSale(_nft,_tokenId,_price,_buyer);
+
+  function offerForSale(address _nft,uint256 _tokenId,uint256 _price,uint256 _deadline) external nonReentrant{
+    _offerForSale(_nft,_tokenId,_price,address(0),_deadline);
   }
 
-  function _offerForSale(address _nft,uint256 _tokenId,uint256 _price,address _buyer) internal{
+  function offerForSaleWithLimitedBuyer(address _nft,uint256 _tokenId,uint256 _price,address _buyer,uint256 _deadline) external nonReentrant{
+    _offerForSale(_nft,_tokenId,_price,_buyer,_deadline);
+  }
+
+  function _offerForSale(address _nft,uint256 _tokenId,uint256 _price,address _buyer,uint256 _deadline) internal{
+    address ownerOf = IERC721(_nft).ownerOf(_tokenId);
+    require(_msgSender() == ownerOf,'you are not the nft owner');
+
     address approvedAddress = IERC721(_nft).getApproved(_tokenId);
     bool isOperator = IERC721(_nft).isApprovedForAll(_msgSender(), address(this));
     require(approvedAddress == address(this) || isOperator,'not allowed');
+    require(_deadline > block.timestamp,'deadline is error');
     
-    _createOrder(_nft, _tokenId, _price, _buyer, Direction.sell);
+    _createOrder(_nft, _tokenId, _price,_deadline, _buyer, Direction.sell);
   }
 
   
 
   
  
-  function offerForBuyer(address _nft,uint256 _tokenId)payable external nonReentrant{
+  function offerForBuyer(address _nft,uint256 _tokenId,uint256 _deadline)payable external nonReentrant{
     require(msg.value > 0,'Price must be greater than 0');
-    _createOrder(_nft, _tokenId, msg.value, address(0), Direction.buy);
+    require(_deadline > block.timestamp,'deadline is error');
+
+    _createOrder(_nft, _tokenId, msg.value,_deadline, address(0), Direction.buy);
   }
 
   
@@ -100,13 +111,15 @@ contract CloseSea is ReentrancyGuard,Context{
     require(order.creater == _msgSender(),'not your order');
     require(order.status == Status.open,'order closed');
 
-    order.status = Status.cancel;
     if(order.direction == Direction.buy){
       require(
         payable(_msgSender()).send(order.price),
         'Failed to return eth'
         );
+    }else{
+      require(block.timestamp <= order.deadline,'The order has timed out, no need to cancel');
     }
+    order.status = Status.cancel;
     emit CancelOrder(_msgSender(), _orderId, order.direction);
   }
 
@@ -137,7 +150,7 @@ contract CloseSea is ReentrancyGuard,Context{
     require(_orderId < orderIds.current(),'order does not exist');
     
     Order storage order = orders[_orderId];
-    require(order.status == Status.open,'order closed');
+    require(order.status == Status.open && block.timestamp <= order.deadline,'order closed');
     require(order.price == _price && order.tokenId == _tokenId && order.nft == _nft,'Order information has changed');
     require(order.creater != _msgSender(),'Cannot trade own orders');
     if(order.otherside != address(0)){
@@ -156,12 +169,13 @@ contract CloseSea is ReentrancyGuard,Context{
     emit Clinch(order.nft, order.tokenId, order.price, order.id);
   }
 
-  function _createOrder(address _nft,uint256 _tokenId,uint256 _price,address _otherside,Direction direction)internal{
+  function _createOrder(address _nft,uint256 _tokenId,uint256 _price,uint256 _deadline,address _otherside,Direction direction)internal{
     uint256 _id = orderIds.current();
     Order memory order =  Order({
       id: _id,
       tokenId: _tokenId,
       price: _price,
+      deadline: _deadline,
       nft: _nft,
       otherside: _otherside,
       creater: _msgSender(),
@@ -181,7 +195,7 @@ contract CloseSea is ReentrancyGuard,Context{
     require(_price != _newPrice,'why do it');
 
     Order memory order = orders[_orderId];
-    require(order.status == Status.open,'order closed');
+    require(order.status == Status.open && block.timestamp <= order.deadline,'order closed');
     require(order.price == _price ,'Order information has changed');
     require(order.creater == _msgSender(),'not your order');
   }
